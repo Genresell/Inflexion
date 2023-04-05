@@ -1,0 +1,111 @@
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
+from urllib.parse import urlparse
+
+import torch
+from transformers import BertTokenizer, BertLMHeadModel
+
+urls = [
+    'https://www.wsj.com/',
+    'https://www.cnn.com/',
+    'https://www.nytimes.com/',
+    'https://www.theguardian.com/international',
+    'https://www.reuters.com/news/world'
+]
+
+# Initialize an empty list to store the scraped data
+articles = []
+
+for url in urls:
+    response = requests.get(url)
+    soup = BeautifulSoup(response.content, 'html.parser')
+    articles += soup.find_all('article')
+
+data = []
+for article in articles:
+    article_url = article.find('a')['href']
+    if not article_url.startswith('http'):
+        article_url = f'https://{urlparse(url).netloc}{article_url}'
+
+    title = article.find('h3')
+    if title:
+        title = title.text.strip()
+
+    date = article.find('time')
+    if date:
+        try:
+            date = datetime.strptime(date['datetime'], '%Y-%m-%dT%H:%M:%S.%fZ')
+            date = date.strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            date = None
+
+    author = article.find('span', class_='c-byline__name')
+    if author:
+        author = author.text.strip()
+
+    content = ''
+    content_url = article_url
+    content_response = requests.get(content_url)
+    content_soup = BeautifulSoup(content_response.content, 'html.parser')
+    paragraphs = content_soup.find_all('p')
+    for paragraph in paragraphs:
+        content += paragraph.text
+
+    data.append({
+        'title': title,
+        'date': date,
+        'author': author,
+        'content': content,
+        'url': article_url
+    })
+
+df = pd.DataFrame(data)
+print(df.tail())
+
+# load pre-trained BERT model and tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+model = BertLMHeadModel.from_pretrained('bert-base-uncased')
+
+# define function to preprocess text data for BERT
+def preprocess_text(text):
+    # tokenize text
+    tokenized_text = tokenizer.encode_plus(
+        text,
+        add_special_tokens=True,
+        truncation=True,
+        max_length=127,
+        return_token_type_ids=False,
+        padding='max_length',
+        return_attention_mask=True,
+        return_tensors='pt'
+    )
+
+    return tokenized_text
+
+# define function to generate summary using BERT
+def generate_summary(text):
+    # preprocess text
+    tokenized_text = preprocess_text(text)
+
+    # generate summary
+    summary_ids = model.generate(
+        input_ids=tokenized_text['input_ids'],
+        attention_mask=tokenized_text['attention_mask'],
+        max_length=128,
+        num_beams=4,
+        early_stopping=True
+    )
+
+    # decode summary
+    summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+
+    return summary
+
+# preprocess content and generate summary for each article in dataframe
+df['content_preprocessed'] = df['content'].apply(preprocess_text)
+df['summary'] = df['content'].apply(generate_summary)
+
+# view final dataframe with summary column added
+print(df.tail())
