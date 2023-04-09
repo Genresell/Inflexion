@@ -40,59 +40,66 @@ import re, nltk,gensim
 import warnings
 warnings.filterwarnings('ignore')
 
-urls = [
+import schedule
+import time
+
+data = []
+
+def web_scraper():
+    urls = [
     'https://www.wsj.com/',
     'https://www.cnn.com/',
     'https://www.nytimes.com/',
     'https://www.theguardian.com/international',
     'https://www.reuters.com/news/world'
-]
+    ]
 
-# Initialize an empty list to store the scraped data
-articles = []
+    # Initialize an empty list to store the scraped data
+    articles = []
 
-for url in urls:
-    response = requests.get(url)
-    soup = BeautifulSoup(response.content, 'html.parser')
-    articles += soup.find_all('article')
+    for url in urls:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        articles += soup.find_all('article')
 
-data = []
-for article in articles:
-    article_url = article.find('a')['href']
-    if not article_url.startswith('http'):
-        article_url = f'https://{urlparse(url).netloc}{article_url}'
+    for article in articles:
+        article_url = article.find('a')['href']
+        if not article_url.startswith('http'):
+            article_url = f'https://{urlparse(url).netloc}{article_url}'
 
-    title = article.find('h3')
-    if title:
-        title = title.text.strip()
+        title = article.find('h3')
+        if title:
+            title = title.text.strip()
 
-    date = article.find('time')
-    if date:
-        try:
-            date = datetime.strptime(date['datetime'], '%Y-%m-%dT%H:%M:%S.%fZ')
-            date = date.strftime('%Y-%m-%d %H:%M:%S')
-        except ValueError:
-            date = None
+        date = article.find('time')
+        if date:
+            try:
+                date = datetime.strptime(date['datetime'], '%Y-%m-%dT%H:%M:%S.%fZ')
+                date = date.strftime('%Y-%m-%d %H:%M:%S')
+            except ValueError:
+                date = None
 
-    author = article.find('span', class_='c-byline__name')
-    if author:
-        author = author.text.strip()
+        author = article.find('span', class_='c-byline__name')
+        if author:
+            author = author.text.strip()
 
-    content = ''
-    content_url = article_url
-    content_response = requests.get(content_url)
-    content_soup = BeautifulSoup(content_response.content, 'html.parser')
-    paragraphs = content_soup.find_all('p')
-    for paragraph in paragraphs:
-        content += paragraph.text
+        content = ''
+        content_url = article_url
+        content_response = requests.get(content_url)
+        content_soup = BeautifulSoup(content_response.content, 'html.parser')
+        paragraphs = content_soup.find_all('p')
+        for paragraph in paragraphs:
+            content += paragraph.text
 
-    data.append({
-        'title': title,
-        'date': date,
-        'author': author,
-        'content': content,
-        'url': article_url
-    })
+        data.append({
+            'title': title,
+            'date': date,
+            'author': author,
+            'content': content,
+            'url': article_url
+        })
+
+web_scraper()
 
 df = pd.DataFrame(data)
 print(df.tail())
@@ -159,13 +166,35 @@ df['sentiment_label'] = df['sentiment_scores'].apply(lambda x: get_sentiment_lab
 # view final dataframe with sentiment scores column added
 print(df.tail())
 
-# Count the number of articles in each sentiment category
-sentiment_counts = df['sentiment_label'].value_counts()
+# Define the sentiment analysis function
+def analyze_sentiment(text):
+    # Instantiate the SentimentIntensityAnalyzer from NLTK
+    sia = SentimentIntensityAnalyzer()
 
-# Visualize the sentiment counts using a pie chart
-plt.pie(sentiment_counts, labels=sentiment_counts.index, autopct='%1.1f%%')
-plt.title('Sentiment Distribution')
-plt.show()
+    # Analyze the sentiment of the text
+    sentiment = sia.polarity_scores(text)
+
+    return sentiment
+
+# Define the function to update the data analysis and insights
+def update_insights(df):
+    # Generate a summary for each article
+    df["summary"] = df["content"].apply(generate_summary)
+
+    # Analyze the sentiment of each article summary
+    df["sentiment"] = df["summary"].apply(analyze_sentiment)
+
+    # Generate insights based on the sentiment analysis
+    positive_articles = df[df["sentiment"]["compound"] > 0.5]
+    negative_articles = df[df["sentiment"]["compound"] < -0.5]
+    neutral_articles = df[(df["sentiment"]["compound"] >= -0.5) & (df["sentiment"]["compound"] <= 0.5)]
+
+    # Print the number of positive, negative, and neutral articles
+    print("Number of positive articles: {}".format(len(positive_articles)))
+    print("Number of negative articles: {}".format(len(negative_articles)))
+    print("Number of neutral articles: {}".format(len(neutral_articles)))
+
+    # Generate visualizations of the sentiment analysis results
 
 import re 
 def preprocess_text(text):
@@ -355,3 +384,51 @@ df['Topics']=df['Topics'].astype(int)
 data_2=pd.merge(df,df_topic_keywords[['Topics','keywords']],left_on = 'Topics',right_on= 'Topics',how='left')
 
 data_2.tail()
+
+# Define function to run the pipeline
+def run_pipeline():
+    # Run the web scraper
+    process = CrawlerProcess(get_project_settings())
+    process.crawl(MySpider)
+    process.start()
+
+    # Load the scraped data into a dataframe
+    new_data = pd.read_csv('data.csv')
+
+    # Generate summaries for the new data
+    new_data['summary'] = new_data['text'].apply(summarize_text)
+
+    # Combine the new data with the existing data
+    all_data = pd.concat([data, new_data])
+
+    # Perform sentiment analysis on the summaries
+    vectorizer = CountVectorizer(stop_words='english', max_df=0.95, min_df=2)
+    data_vectorized = vectorizer.fit_transform(all_data['summary'])
+    lda_model = LatentDirichletAllocation(n_components=3, random_state=42)
+    lda_model.fit(data_vectorized)
+    lda_output = lda_model.transform(data_vectorized)
+    all_data['sentiment_label'], all_data['sentiment_scores'] = zip(*all_data['summary'].apply(analyze_sentiment))
+
+    # Visualize the topics and sentiment scores
+    panel = pyLDAvis.sklearn.prepare(lda_model, data_vectorized, vectorizer, mds='tsne')
+    pyLDAvis.save_html(panel, 'panel.html')
+    print('Pipeline run complete.')
+
+# Define the main function that runs the pipeline
+def main():
+    # Run the web scraper
+    df = web_scraper()
+
+    # Update the data analysis and insights
+    update_insights(df)
+
+# Use the schedule library to run the main function periodically
+schedule.every(24).hours.do(main)
+
+# Use a try-except block to handle any exceptions that occur during execution
+try:
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
+except Exception as e:
+    print("An error occurred: {}".format(str(e)))
